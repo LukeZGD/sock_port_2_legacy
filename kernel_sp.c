@@ -1,10 +1,10 @@
 #include <mach/mach.h>
 
-#include <plog.h>
-#include <sockpuppet.h>
-#include <common.h>
-#include <io.h>
-#include <kernel.h>
+#include "plog.h"
+#include "sockpuppet.h"
+#include "common.h"
+#include "io.h"
+#include "kernel.h"
 
 mach_port_t tfp0_sp = 0;
 
@@ -68,11 +68,7 @@ kern_return_t kread64_sp(addr_t addr, uint64_t* retval)
 
 kern_return_t kreadptr_sp(addr_t addr, addr_t* retval)
 {
-#ifdef __LP64__
-    return kread64_sp(addr, retval);
-#else
     return kread32_sp(addr, retval);
-#endif
 }
 
 kern_return_t kwrite8_sp(addr_t addr, uint8_t val)
@@ -97,11 +93,7 @@ kern_return_t kwrite64_sp(addr_t addr, uint64_t val)
 
 kern_return_t kwriteptr_sp(addr_t addr, addr_t val)
 {
-#ifdef __LP64__
-    return kwrite64_sp(addr, val);
-#else
     return kwrite32_sp(addr, val);
-#endif
 }
 
 kern_return_t kalloc_sp(addr_t* retval, vm_size_t size)
