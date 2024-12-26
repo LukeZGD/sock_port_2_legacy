@@ -514,10 +514,9 @@ DEVLOG("%s: " ADDR, #val, val); \
         goto fail;
     }
 
-    static const size_t pipebuf_size = 0x8000;
+    size_t pipebuf_size = 0x8000;
     size_t pipebuf_sizep = 0x10000;
-    static uint8_t pipebuf[pipebuf_size];
-    memset(pipebuf, 0, pipebuf_size);
+    uint8_t *pipebuf = calloc(1, pipebuf_size);
     *(addr_t*)(pipebuf) = pipebuf_sizep;
 
     write(port_pointer_overwrite_pipe[1], pipebuf, pipebuf_size);
