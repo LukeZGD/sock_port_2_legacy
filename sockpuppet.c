@@ -8,14 +8,13 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <unistd.h>
-#include "../IOKit/IOKitLib.h"
 
 #include "plog.h"
 #include "sockpuppet.h"
 #include "common.h"
 #include "io.h"
 #include "kernel.h"
-#include "offsets.h"
+#include "offset.h"
 
 static inline uint32_t mach_port_waitq_flags(void)
 {
@@ -423,7 +422,7 @@ kern_fail:
     return err;
 }
 
-mach_port_t exploit(addr_t* kslide)
+mach_port_t exploit(addr_t* kslide, bool is_ios9)
 {
     kern_return_t err = KERN_SUCCESS;
 
@@ -898,7 +897,7 @@ DEVLOG("%s: " ADDR, #val, val); \
     setuid(0); // update host port, security token and whatnot
     LOG_("uid: %u", getuid());
 
-    extern addr_t self_port_address;
+    addr_t self_port_address;
     self_port_address = self_port_addr;
 
     LOG_("exploit done!");
